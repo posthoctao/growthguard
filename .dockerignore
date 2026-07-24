@@ -1,0 +1,48 @@
+# Git
+.git
+.gitignore
+
+# Environment variables and secrets
+.env
+.env.*
+
+# Python cache
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing and development cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE and operating system files
+.DS_Store
+.vscode/
+.idea/
+
+# Proprietary data and local state
+data/raw/
+data/cleaned/
+data/memory/
+logs/
+evaluation/results/
+
+# Notebooks and archived files
+*.ipynb
+notebooks/
+archive/
+
+# Local temporary files
+*.backup
+growthguard_security_scan.txt
+generate_schema_report.py
+schema_report.json

@@ -1,0 +1,70 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+
+# Testing and development cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter temporary files
+.ipynb_checkpoints/
+data_check.ipynb
+
+# IDE and operating system files
+.DS_Store
+.vscode/
+.idea/
+
+# Proprietary business data
+data/raw/*
+data/cleaned/*
+
+# Keep private data directory structure
+!data/raw/.gitkeep
+!data/cleaned/.gitkeep
+
+# Additional private data file types
+data/**/*.csv
+data/**/*.xlsx
+data/**/*.xls
+data/**/*.json
+data/**/*.parquet
+data/**/*.db
+data/**/*.sqlite
+data/**/*.sqlite3
+
+# Persistent session memory
+data/memory/*
+!data/memory/.gitkeep
+
+# Application logs
+logs/*
+!logs/.gitkeep
+
+# Generated evaluation results
+evaluation/results/*
+!evaluation/results/.gitkeep
+
+# Local security and inspection files
+growthguard_security_scan.txt
+generate_schema_report.py
+schema_report.json
