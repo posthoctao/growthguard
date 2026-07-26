@@ -9,36 +9,29 @@ from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
-from fastapi import (
-    FastAPI,
-    HTTPException,
-    Request,
-)
-from fastapi.exceptions import (
-    RequestValidationError,
-)
-from fastapi.middleware.cors import (
-    CORSMiddleware,
-)
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
 
-from sources.agent.agent_service import (
-    run_agent_with_details,
-)
+from sources.agent.agent_service import run_agent_with_details
 from sources.core.exceptions import (
     AgentApplicationError,
     InputValidationError,
     RequestTimeoutError,
+)
+from sources.memory.long_term_memory import (
+    clear_user_memories,
+    list_user_memories,
+    normalize_user_id,
 )
 from sources.memory.session_manager import (
     clear_session_memory,
     get_session_messages,
     normalize_session_id,
 )
-from sources.observability.logger import (
-    log_event,
-)
+from sources.observability.logger import log_event
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -49,7 +42,6 @@ EVALUATION_RESULT_PATH = (
     / "results"
     / "latest_evaluation.json"
 )
-
 
 REQUEST_ID_PATTERN = re.compile(
     r"^[A-Za-z0-9_-]{8,128}$"
@@ -79,18 +71,14 @@ def read_positive_integer(
     return parsed_value
 
 
-REQUEST_TIMEOUT_SECONDS = (
-    read_positive_integer(
-        "REQUEST_TIMEOUT_SECONDS",
-        180,
-    )
+REQUEST_TIMEOUT_SECONDS = read_positive_integer(
+    "REQUEST_TIMEOUT_SECONDS",
+    180,
 )
 
-MAX_CONCURRENT_REQUESTS = (
-    read_positive_integer(
-        "MAX_CONCURRENT_REQUESTS",
-        4,
-    )
+MAX_CONCURRENT_REQUESTS = read_positive_integer(
+    "MAX_CONCURRENT_REQUESTS",
+    4,
 )
 
 REQUEST_SEMAPHORE = asyncio.Semaphore(
@@ -99,6 +87,10 @@ REQUEST_SEMAPHORE = asyncio.Semaphore(
 
 
 class AskRequest(BaseModel):
+    """
+    Request body for one GrowthGuard question.
+    """
+
     question: str = Field(
         min_length=1,
         max_length=3000,
@@ -110,22 +102,50 @@ class AskRequest(BaseModel):
         max_length=128,
     )
 
+    user_id: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=128,
+    )
+
 
 class AskResponse(BaseModel):
+    """
+    User-facing response from GrowthGuard.
+    """
+
     status: str
     answer: str
     session_id: str
+    user_id: str
     request_id: str
 
 
 class SessionHistoryResponse(BaseModel):
+    """
+    Stored short-term history for one session.
+    """
+
     session_id: str
     messages: list[dict[str, str]]
 
 
+class UserMemoriesResponse(BaseModel):
+    """
+    Stored long-term preferences for one user.
+    """
+
+    user_id: str
+    memories: list[dict[str, Any]]
+
+
 app = FastAPI(
-    title="GrowthGuard Growth Analytics API",
-    version="1.3.0",
+    title="GrowthGuard API",
+    description=(
+        "Agent-based DTC growth analytics service "
+        "with short-term and long-term memory."
+    ),
+    version="1.4.0",
 )
 
 
@@ -179,7 +199,7 @@ async def request_tracking_middleware(
     call_next,
 ):
     """
-    Assign a request ID and log HTTP request duration.
+    Assign one request ID and record HTTP duration.
     """
     request_id = create_request_id(
         request.headers.get(
@@ -249,16 +269,10 @@ async def agent_application_error_handler(
         status_code=error.status_code,
         content={
             "status": "error",
-            "error_code": (
-                error.error_code
-            ),
-            "message": (
-                error.user_message
-            ),
-            "request_id": (
-                get_request_id(
-                    request
-                )
+            "error_code": error.error_code,
+            "message": error.user_message,
+            "request_id": get_request_id(
+                request
             ),
         },
     )
@@ -295,10 +309,8 @@ async def request_validation_error_handler(
             "message": (
                 "The request body is invalid."
             ),
-            "request_id": (
-                get_request_id(
-                    request
-                )
+            "request_id": get_request_id(
+                request
             ),
         },
     )
@@ -339,10 +351,8 @@ async def http_exception_handler(
             "status": "error",
             "error_code": "HTTP_ERROR",
             "message": message,
-            "request_id": (
-                get_request_id(
-                    request
-                )
+            "request_id": get_request_id(
+                request
             ),
         },
     )
@@ -370,17 +380,13 @@ async def unexpected_error_handler(
         status_code=500,
         content={
             "status": "error",
-            "error_code": (
-                "INTERNAL_ERROR"
-            ),
+            "error_code": "INTERNAL_ERROR",
             "message": (
                 "The analytics service encountered "
                 "an unexpected error."
             ),
-            "request_id": (
-                get_request_id(
-                    request
-                )
+            "request_id": get_request_id(
+                request
             ),
         },
     )
@@ -388,16 +394,20 @@ async def unexpected_error_handler(
 
 @app.get("/")
 def read_root() -> dict[str, str]:
+    """
+    Return basic service information.
+    """
     return {
-        "service": (
-            "GrowthGuard Growth Analytics API"
-        ),
+        "service": "GrowthGuard API",
         "status": "running",
     }
 
 
 @app.get("/health")
 def health_check() -> dict[str, Any]:
+    """
+    Return service configuration and health status.
+    """
     return {
         "status": "healthy",
         "openai_api_key_configured": bool(
@@ -409,8 +419,11 @@ def health_check() -> dict[str, Any]:
             "OPENAI_MODEL",
             "gpt-5-nano",
         ),
-        "session_memory": (
-            "persistent_sqlite"
+        "short_term_memory": (
+            "persistent_sqlite_session"
+        ),
+        "long_term_memory": (
+            "persistent_sqlite_user_memory"
         ),
         "guardrails": "enabled",
         "observability": (
@@ -442,8 +455,16 @@ async def ask_question(
     request_body: AskRequest,
     request: Request,
 ) -> AskResponse:
+    """
+    Run one GrowthGuard request with dual-layer memory.
+    """
     session_id = (
         request_body.session_id
+        or uuid4().hex
+    )
+
+    user_id = (
+        request_body.user_id
         or uuid4().hex
     )
 
@@ -451,6 +472,12 @@ async def ask_question(
         normalized_session_id = (
             normalize_session_id(
                 session_id
+            )
+        )
+
+        normalized_user_id = (
+            normalize_user_id(
+                user_id
             )
         )
 
@@ -466,11 +493,12 @@ async def ask_question(
     async def execute_request():
         async with REQUEST_SEMAPHORE:
             return await run_agent_with_details(
-                question=(
-                    request_body.question
-                ),
+                question=request_body.question,
                 session_id=(
                     normalized_session_id
+                ),
+                user_id=(
+                    normalized_user_id
                 ),
                 request_id=request_id,
             )
@@ -497,6 +525,9 @@ async def ask_question(
         session_id=(
             normalized_session_id
         ),
+        user_id=(
+            normalized_user_id
+        ),
         request_id=request_id,
     )
 
@@ -508,6 +539,9 @@ async def ask_question(
 async def read_session_history(
     session_id: str,
 ) -> SessionHistoryResponse:
+    """
+    Read short-term conversation history.
+    """
     try:
         normalized_session_id = (
             normalize_session_id(
@@ -536,6 +570,9 @@ async def read_session_history(
 async def delete_session_history(
     session_id: str,
 ) -> dict[str, str]:
+    """
+    Clear only the selected short-term session.
+    """
     try:
         normalized_session_id = (
             normalize_session_id(
@@ -560,10 +597,73 @@ async def delete_session_history(
     }
 
 
+@app.get(
+    "/users/{user_id}/memories",
+    response_model=UserMemoriesResponse,
+)
+async def read_user_memories(
+    user_id: str,
+) -> UserMemoriesResponse:
+    """
+    Read long-term preferences saved for one user.
+    """
+    try:
+        normalized_user_id = normalize_user_id(
+            user_id
+        )
+
+    except ValueError as error:
+        raise InputValidationError(
+            str(error)
+        ) from error
+
+    memories = list_user_memories(
+        user_id=normalized_user_id,
+    )
+
+    return UserMemoriesResponse(
+        user_id=normalized_user_id,
+        memories=memories,
+    )
+
+
+@app.delete(
+    "/users/{user_id}/memories"
+)
+async def delete_user_memories(
+    user_id: str,
+) -> dict[str, Any]:
+    """
+    Clear all long-term preferences for one user.
+    """
+    try:
+        normalized_user_id = normalize_user_id(
+            user_id
+        )
+
+    except ValueError as error:
+        raise InputValidationError(
+            str(error)
+        ) from error
+
+    deleted_count = clear_user_memories(
+        user_id=normalized_user_id,
+    )
+
+    return {
+        "status": "cleared",
+        "user_id": normalized_user_id,
+        "deleted_count": deleted_count,
+    }
+
+
 @app.get("/evaluation/latest")
 def get_latest_evaluation(
     include_cases: bool = False,
 ) -> dict[str, Any]:
+    """
+    Read the latest stored evaluation result.
+    """
     if not EVALUATION_RESULT_PATH.exists():
         raise HTTPException(
             status_code=404,

@@ -14,7 +14,7 @@ MODEL_NAME = os.getenv(
 
 class ResolvedQuestion(BaseModel):
     """
-    A standalone question resolved from conversation history.
+    A standalone question resolved from available context.
     """
 
     standalone_question: str = Field(
@@ -30,42 +30,32 @@ def build_context_resolver_agent() -> Agent:
     Create the conversation-context resolver.
     """
     return Agent(
-        name="GrowthGuard Conversation Context Resolver",
+        name="GrowthGuard Context Resolver",
         model=MODEL_NAME,
         output_type=ResolvedQuestion,
         instructions="""
-You resolve follow-up messages in a GrowthGuard DTC analytics
-conversation.
+Rewrite the latest message as a complete standalone GrowthGuard
+analytics question.
 
-Your only responsibility is to rewrite the user's latest message
-as a complete standalone business question.
+You may use:
+- recent messages from the current session;
+- durable long-term user preferences.
 
 Rules:
-1. Use recent conversation history only to resolve references such as:
-   - it
-   - that
-   - those
-   - them
-   - what about
-   - compared with that
-   - 那
-   - 它
-   - 这个
-   - 上面
-   - 相比呢
-   - 为什么会这样
-2. Preserve the user's analytical intent.
-3. Preserve explicitly mentioned dates, months, products, channels,
-   metrics, and comparison requirements.
-4. Do not calculate metrics.
-5. Do not answer the question.
-6. Do not invent business context.
-7. Do not treat previously mentioned KPI values as current data.
-8. Current KPI values must still be retrieved from deterministic tools.
-9. Write the standalone question in the same primary language as the
-   user's latest message.
-10. If the latest message is already standalone, return it with only
-    minimal wording cleanup.
+1. Resolve references such as "that", "it", "compared with that",
+   "那", "这个", "上面", "相比呢" and "按我平时关注的方向".
+2. Preserve dates, products, channels, metrics and comparisons.
+3. Use long-term memory only for durable preferences, recurring focus,
+   team role and response requirements.
+4. Never treat a value stored in memory as a current KPI.
+5. Current business values must still be obtained from deterministic
+   analytics tools.
+6. Do not calculate metrics.
+7. Do not answer the question.
+8. Do not invent missing business context.
+9. Write in the same primary language as the latest message.
+10. When the latest message is already standalone, make only minimal
+    wording changes.
 """.strip(),
     )
 
@@ -73,9 +63,10 @@ Rules:
 async def resolve_user_question(
     question: str,
     conversation_context: str = "",
+    user_memory_context: str = "",
 ) -> str:
     """
-    Resolve a user message into a standalone analytics question.
+    Resolve one message using session and long-term memory.
     """
     normalized_question = " ".join(
         question.strip().split()
@@ -86,7 +77,10 @@ async def resolve_user_question(
             "Question cannot be empty."
         )
 
-    if not conversation_context.strip():
+    if (
+        not conversation_context.strip()
+        and not user_memory_context.strip()
+    ):
         return normalized_question
 
     if not os.getenv("OPENAI_API_KEY"):
@@ -95,19 +89,25 @@ async def resolve_user_question(
         )
 
     resolver_input = f"""
-Recent user-facing conversation:
+Long-term user memory:
 
-{conversation_context}
+{user_memory_context or "No saved long-term preferences."}
+
+Recent conversation in the current session:
+
+{conversation_context or "No recent session history."}
 
 Latest user message:
 
 {normalized_question}
 
-Rewrite only the latest user message as a complete standalone
+Rewrite only the latest message as a complete standalone
 GrowthGuard analytics question.
 """.strip()
 
-    resolver_agent = build_context_resolver_agent()
+    resolver_agent = (
+        build_context_resolver_agent()
+    )
 
     result = await Runner.run(
         resolver_agent,

@@ -17,6 +17,9 @@ from sources.agent.executor import (
 from sources.agent.final_response_agent import (
     generate_final_response,
 )
+from sources.agent.memory_extractor import (
+    extract_long_term_memory_changes,
+)
 from sources.agent.planner import (
     AnalysisPlan,
     create_analysis_plan,
@@ -35,6 +38,11 @@ from sources.guardrails.output_validator import (
 )
 from sources.guardrails.plan_validator import (
     validate_analysis_plan,
+)
+from sources.memory.long_term_memory import (
+    apply_memory_changes,
+    get_user_memory_context,
+    normalize_user_id,
 )
 from sources.memory.session_manager import (
     get_conversation_context,
@@ -76,7 +84,7 @@ MONTH_NAME_TO_NUMBER = {
 
 class AgentRunResult(BaseModel):
     """
-    Standard result returned by the analytics workflow.
+    Standard result returned by the GrowthGuard workflow.
     """
 
     status: RunStatus
@@ -86,6 +94,8 @@ class AgentRunResult(BaseModel):
     in_scope: bool
 
     session_id: str | None = None
+
+    user_id: str | None = None
 
     original_question: str
 
@@ -231,7 +241,7 @@ async def load_conversation_context(
     request_id: str,
 ) -> str:
     """
-    Load session history without failing the full request.
+    Load short-term session history without failing the request.
     """
     try:
         return await get_conversation_context(
@@ -252,15 +262,45 @@ async def load_conversation_context(
         return ""
 
 
-async def resolve_question_safely(
-    question: str,
-    conversation_context: str,
+async def load_user_memory_safely(
+    user_id: str,
     request_id: str,
 ) -> str:
     """
-    Resolve a follow-up question with a safe fallback.
+    Load long-term user memory without failing the request.
     """
-    if not conversation_context:
+    try:
+        return get_user_memory_context(
+            user_id=user_id,
+        )
+
+    except Exception as error:
+        log_event(
+            "long_term_memory_load_failed",
+            level=logging.WARNING,
+            request_id=request_id,
+            user_hash=hash_identifier(
+                user_id
+            ),
+            error_type=type(error).__name__,
+        )
+
+        return ""
+
+
+async def resolve_question_safely(
+    question: str,
+    conversation_context: str,
+    user_memory_context: str,
+    request_id: str,
+) -> str:
+    """
+    Resolve a follow-up question using session and user memory.
+    """
+    if (
+        not conversation_context
+        and not user_memory_context
+    ):
         return question
 
     try:
@@ -269,6 +309,9 @@ async def resolve_question_safely(
                 question=question,
                 conversation_context=(
                     conversation_context
+                ),
+                user_memory_context=(
+                    user_memory_context
                 ),
             )
         )
@@ -312,6 +355,35 @@ async def create_plan_safely(
         ) from error
 
 
+def build_final_question(
+    question: str,
+    user_memory_context: str,
+) -> str:
+    """
+    Attach durable response preferences to the final-answer request.
+    """
+    if not user_memory_context.strip():
+        return question
+
+    return f"""
+User question:
+
+{question}
+
+Durable user preferences:
+
+{user_memory_context}
+
+Apply these preferences silently.
+
+Rules:
+- Do not mention that long-term memory was used.
+- Do not treat stored preferences as business evidence.
+- Do not use memory as a source for current KPI values.
+- Current metrics must come only from deterministic analytics tools.
+""".strip()
+
+
 async def generate_answer_safely(
     question: str,
     plan: AnalysisPlan,
@@ -344,7 +416,7 @@ async def save_memory_safely(
     request_id: str,
 ) -> None:
     """
-    Save memory without failing the completed answer.
+    Save short-term session memory without failing the answer.
     """
     try:
         await save_conversation_turn(
@@ -365,13 +437,64 @@ async def save_memory_safely(
         )
 
 
+async def update_long_term_memory_safely(
+    user_id: str,
+    session_id: str | None,
+    user_message: str,
+    existing_memory_context: str,
+    request_id: str,
+) -> None:
+    """
+    Extract and save durable user preferences.
+    """
+    try:
+        changes = (
+            await extract_long_term_memory_changes(
+                user_message=user_message,
+                existing_memory_context=(
+                    existing_memory_context
+                ),
+            )
+        )
+
+        if not changes:
+            return
+
+        applied_count = apply_memory_changes(
+            user_id=user_id,
+            changes=changes,
+            source_session_id=session_id,
+        )
+
+        log_event(
+            "long_term_memory_updated",
+            request_id=request_id,
+            user_hash=hash_identifier(
+                user_id
+            ),
+            applied_count=applied_count,
+        )
+
+    except Exception as error:
+        log_event(
+            "long_term_memory_save_failed",
+            level=logging.WARNING,
+            request_id=request_id,
+            user_hash=hash_identifier(
+                user_id
+            ),
+            error_type=type(error).__name__,
+        )
+
+
 async def run_agent_with_details(
     question: str,
     session_id: str | None = None,
+    user_id: str | None = None,
     request_id: str | None = None,
 ) -> AgentRunResult:
     """
-    Run the complete guarded and observable workflow.
+    Run the complete guarded, observable and memory-enabled workflow.
     """
     original_question = normalize_question(
         question
@@ -399,7 +522,12 @@ async def run_agent_with_details(
             None
         )
 
+        normalized_user_id: str | None = (
+            None
+        )
+
         conversation_context = ""
+        user_memory_context = ""
 
         if session_id is not None:
             normalized_session_id = (
@@ -422,14 +550,40 @@ async def run_agent_with_details(
                     )
                 )
 
+        if user_id is not None:
+            normalized_user_id = (
+                normalize_user_id(
+                    user_id
+                )
+            )
+
+            with tracker.stage(
+                "long_term_memory_load"
+            ):
+                user_memory_context = (
+                    await load_user_memory_safely(
+                        user_id=(
+                            normalized_user_id
+                        ),
+                        request_id=(
+                            tracker.request_id
+                        ),
+                    )
+                )
+
         with tracker.stage(
             "context_resolution"
         ):
             resolved_question = (
                 await resolve_question_safely(
-                    question=original_question,
+                    question=(
+                        original_question
+                    ),
                     conversation_context=(
                         conversation_context
+                    ),
+                    user_memory_context=(
+                        user_memory_context
                     ),
                     request_id=(
                         tracker.request_id
@@ -442,7 +596,9 @@ async def run_agent_with_details(
             != original_question
         )
 
-        with tracker.stage("planning"):
+        with tracker.stage(
+            "planning"
+        ):
             plan = await create_plan_safely(
                 resolved_question
             )
@@ -461,7 +617,9 @@ async def run_agent_with_details(
                 )
             )
 
-        with tracker.stage("execution"):
+        with tracker.stage(
+            "execution"
+        ):
             execution = (
                 await execute_analysis_plan(
                     plan=plan,
@@ -487,14 +645,19 @@ async def run_agent_with_details(
                 "All selected analytics tools failed."
             )
 
+        final_question = build_final_question(
+            question=original_question,
+            user_memory_context=(
+                user_memory_context
+            ),
+        )
+
         with tracker.stage(
             "final_response"
         ):
             answer = (
                 await generate_answer_safely(
-                    question=(
-                        original_question
-                    ),
+                    question=final_question,
                     plan=plan,
                     execution=execution,
                 )
@@ -512,6 +675,28 @@ async def run_agent_with_details(
                         original_question
                     ),
                     assistant_message=answer,
+                    request_id=(
+                        tracker.request_id
+                    ),
+                )
+
+        if normalized_user_id:
+            with tracker.stage(
+                "long_term_memory_save"
+            ):
+                await update_long_term_memory_safely(
+                    user_id=(
+                        normalized_user_id
+                    ),
+                    session_id=(
+                        normalized_session_id
+                    ),
+                    user_message=(
+                        original_question
+                    ),
+                    existing_memory_context=(
+                        user_memory_context
+                    ),
                     request_id=(
                         tracker.request_id
                     ),
@@ -538,6 +723,9 @@ async def run_agent_with_details(
             in_scope=plan.in_scope,
             session_id=(
                 normalized_session_id
+            ),
+            user_id=(
+                normalized_user_id
             ),
             original_question=(
                 original_question
@@ -589,6 +777,7 @@ async def run_agent_with_details(
 async def run_agent(
     question: str,
     session_id: str | None = None,
+    user_id: str | None = None,
     request_id: str | None = None,
 ) -> str:
     """
@@ -597,6 +786,7 @@ async def run_agent(
     result = await run_agent_with_details(
         question=question,
         session_id=session_id,
+        user_id=user_id,
         request_id=request_id,
     )
 
