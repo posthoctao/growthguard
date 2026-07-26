@@ -251,10 +251,10 @@ docker compose down
 
 ## 测试
 
-运行全部测试：
+安装开发依赖：
 
 ```bash
-python -m pytest -v
+python -m pip install -r requirements-dev.txt
 ```
 
 检查 Python 文件语法：
