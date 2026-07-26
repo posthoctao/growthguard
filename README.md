@@ -179,6 +179,7 @@ growthguard/
 ├── Dockerfile.streamlit
 ├── compose.yaml
 ├── requirements.txt
+├── requirements-dev.txt
 └── .env.example
 ```
 
@@ -257,13 +258,19 @@ docker compose down
 python -m pip install -r requirements-dev.txt
 ```
 
+运行全部测试：
+
+```bash
+python -m pytest -v
+```
+
 检查 Python 文件语法：
 
 ```bash
 python -m compileall api app sources
 ```
 
-长期记忆测试使用临时 SQLite 数据库，不会修改实际用户记忆文件。
+长期记忆测试使用临时 SQLite 数据库，不会修改实际用户记忆文件
 
 ---
 
