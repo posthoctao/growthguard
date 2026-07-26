@@ -646,7 +646,7 @@ async def run_agent_with_details(
             )
 
         final_question = build_final_question(
-            question=original_question,
+            question=resolved_question,
             user_memory_context=(
                 user_memory_context
             ),
